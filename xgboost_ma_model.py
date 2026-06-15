@@ -14,7 +14,7 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-df = pd.read_csv('/content/european_aerospace_ma_xgboost_v2.csv')
+df = pd.read_csv('/content/european_aerospace_ma_xgboost_v2_augmented_template.csv')
 
 
 df = df.drop(
@@ -29,8 +29,6 @@ df = df.drop(
     ],
     errors='ignore'
 )
-
-
 
 
 X = df.drop(columns=['is_ma_target'])
@@ -54,9 +52,7 @@ X_train, X_val, y_train, y_val = train_test_split(
 )
 
 
-
-
-umeric_cols = X_train.select_dtypes(include=np.number).columns
+numeric_cols = X_train.select_dtypes(include=np.number).columns
 categorical_cols = X_train.select_dtypes(include='object').columns
 
 median_values = X_train[numeric_cols].median()
