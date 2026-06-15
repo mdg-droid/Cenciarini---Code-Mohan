@@ -17,14 +17,27 @@ import seaborn as sns
 df = pd.read_csv('/content/european_aerospace_ma_xgboost_v2.csv')
 
 
-df = df.drop(columns=['company_name', 'status', 'founding_year'], errors='ignore')
+df = df.drop(
+    columns=[
+        'company_name',
+        'status',
+        'founding_year',
+
+        # Fuites d'information
+        'acquirer',
+        'ma_date'
+    ],
+    errors='ignore'
+)
+
+
 
 
 X = df.drop(columns=['is_ma_target'])
 y = df['is_ma_target']
 
 
-X_train, X_test, y_train, y_test = train_test_split(
+X_train_full, X_test, y_train_full, y_test = train_test_split(
     X,
     y,
     test_size=0.20,
@@ -32,18 +45,33 @@ X_train, X_test, y_train, y_test = train_test_split(
     random_state=42
 )
 
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train_full,
+    y_train_full,
+    test_size=0.20,
+    stratify=y_train_full,
+    random_state=42
+)
 
-numeric_cols = X_train.select_dtypes(include=np.number).columns
+
+
+
+umeric_cols = X_train.select_dtypes(include=np.number).columns
 categorical_cols = X_train.select_dtypes(include='object').columns
 
 median_values = X_train[numeric_cols].median()
 
-X_train[numeric_cols] = X_train[numeric_cols].fillna(median_values)
-X_test[numeric_cols] = X_test[numeric_cols].fillna(median_values)
-
+for dataset in [X_train, X_val, X_test]:
+    dataset[numeric_cols] = dataset[numeric_cols].fillna(median_values)
 
 X_train = pd.get_dummies(
     X_train,
+    columns=categorical_cols,
+    drop_first=True
+)
+
+X_val = pd.get_dummies(
+    X_val,
     columns=categorical_cols,
     drop_first=True
 )
@@ -54,6 +82,7 @@ X_test = pd.get_dummies(
     drop_first=True
 )
 
+X_val = X_val.reindex(columns=X_train.columns, fill_value=0)
 X_test = X_test.reindex(columns=X_train.columns, fill_value=0)
 
 training_feature_columns = X_train.columns
@@ -80,8 +109,20 @@ model = xgb.XGBClassifier(
 model.fit(
     X_train,
     y_train,
-    eval_set=[(X_test, y_test)],
+    eval_set=[(X_val, y_val)],
     verbose=False
+)
+
+import shap
+
+explainer = shap.TreeExplainer(model)
+
+shap_values = explainer.shap_values(X_test)
+
+shap.summary_plot(
+    shap_values,
+    X_test,
+    max_display=20
 )
 
 y_pred_proba = model.predict_proba(X_test)[:, 1]
@@ -127,6 +168,8 @@ joblib.dump(
     },
     "ma_xgboost_pipeline.pkl"
 )
+
+
 
 def predict_new_entrant_probability(new_data):
     new_df = pd.DataFrame([new_data])
