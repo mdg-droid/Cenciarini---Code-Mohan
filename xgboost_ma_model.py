@@ -14,7 +14,7 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-df = pd.read_csv('/content/european_aerospace_ma_xgboost_v2_augmented_template.csv')
+df = pd.read_csv('/content/european_aerospace_ma_xgboost_v2.csv')
 
 
 df = df.drop(
