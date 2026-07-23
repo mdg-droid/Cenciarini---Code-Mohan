@@ -1,0 +1,70 @@
+import pandas as pd
+import os
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "..", "results")
+
+from build_training_set import (
+    load_all_data, is_positive, get_col, build_metric_column_map,
+    build_features_for_row, MA_TARGET_COL_CANDIDATES,
+    ACQUISITION_YEAR_COL_CANDIDATES,
+)
+
+
+def main():
+    full = load_all_data()
+    ma_col = get_col(full, MA_TARGET_COL_CANDIDATES)
+    year_col = get_col(full, ACQUISITION_YEAR_COL_CANDIDATES)
+    metric_map = build_metric_column_map(full.columns)
+
+    rows_needing_enrichment = []
+    n_positive_total = 0
+    n_positive_ok = 0
+
+    for _, row in full.iterrows():
+        positive = is_positive(row, ma_col, year_col)
+        if not positive:
+            continue
+        n_positive_total += 1
+
+        year_x = row.get(year_col)
+        try:
+            year_x_valid = pd.notna(year_x) and float(year_x) >= 1980
+        except (TypeError, ValueError):
+            year_x_valid = False
+
+        if not year_x_valid:
+            rows_needing_enrichment.append({
+                "NAME": row["NAME"],
+                "Year of acquisition/merger": None,
+                "raison": "Annee de rachat manquante/invalide (pas seulement un manque de donnees)",
+            })
+            continue
+
+        cutoff_year = int(float(year_x))
+        features, reason = build_features_for_row(row, cutoff_year, metric_map)
+
+        if reason:
+            rows_needing_enrichment.append({
+                "NAME": row["NAME"],
+                "Year of acquisition/merger": cutoff_year,
+                "raison": reason,
+            })
+        else:
+            n_positive_ok += 1
+
+    print(f"Positifs au total : {n_positive_total}")
+    print(f"Positifs deja exploitables : {n_positive_ok}")
+    print(f"Positifs A ENRICHIR (donnees insuffisantes) : {len(rows_needing_enrichment)}")
+
+    output_df = pd.DataFrame(rows_needing_enrichment).sort_values("Year of acquisition/merger")
+    output_path = os.path.join(RESULTS_DIR, "positives_needing_enrichment.csv")
+    output_df.to_csv(output_path, index=False)
+    print(f"\nListe sauvegardee : {output_path}")
+    print("\nApercu :")
+    print(output_df.to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()
+
