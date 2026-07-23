@@ -1,0 +1,99 @@
+import pandas as pd
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+import joblib
+import os
+
+from preprocessing import load_training_data, split_train_val_test, impute_and_scale_for_lr
+from evaluate import find_best_threshold, evaluate
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(SCRIPT_DIR, "..", "data", "training_set_italy.csv")
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "..", "results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+N_ITERATIONS = 10
+SEEDS = list(range(42, 42 + N_ITERATIONS))
+
+
+def run_one_iteration(X, y, seed):
+    X_train, X_val, X_test, y_train, y_val, y_test = split_train_val_test(
+        X, y, random_state=seed
+    )
+    X_train_s, X_val_s, X_test_s, median_values, scaler = impute_and_scale_for_lr(
+        X_train, X_val, X_test
+    )
+
+    model = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=seed)
+    model.fit(X_train_s, y_train)
+
+    y_val_proba = model.predict_proba(X_val_s)[:, 1]
+    best_threshold = find_best_threshold(y_val_proba, y_val)
+
+    y_test_proba = model.predict_proba(X_test_s)[:, 1]
+    metrics = evaluate(y_test, y_test_proba, best_threshold)
+
+    return model, metrics
+
+
+def main():
+    X, y, names = load_training_data(DATA_PATH)
+    print(f"Dataset : {len(X)} lignes, {y.sum()} positifs, {len(X.columns)} features.")
+
+    all_metrics = []
+
+    for seed in SEEDS:
+        model, metrics = run_one_iteration(X, y, seed)
+        all_metrics.append(metrics)
+        print(
+            f"Seed {seed}: AUC-PR={metrics['auc_pr']:.3f} ROC-AUC={metrics['roc_auc']:.3f} "
+            f"seuil={metrics['threshold']:.3f} "
+            f"precision(1)={metrics['classification_report']['1']['precision']:.2f} "
+            f"recall(1)={metrics['classification_report']['1']['recall']:.2f}"
+        )
+
+    auc_prs = [m["auc_pr"] for m in all_metrics]
+    roc_aucs = [m["roc_auc"] for m in all_metrics]
+    precisions_1 = [m["classification_report"]["1"]["precision"] for m in all_metrics]
+    recalls_1 = [m["classification_report"]["1"]["recall"] for m in all_metrics]
+
+    summary = pd.DataFrame({
+        "seed": SEEDS, "auc_pr": auc_prs, "roc_auc": roc_aucs,
+        "precision_class1": precisions_1, "recall_class1": recalls_1,
+    })
+
+    print("\n=== Resume sur 10 iterations ===")
+    print(f"AUC-PR   : median={np.median(auc_prs):.3f}  [{min(auc_prs):.3f}, {max(auc_prs):.3f}]")
+    print(f"ROC-AUC  : median={np.median(roc_aucs):.3f}  [{min(roc_aucs):.3f}, {max(roc_aucs):.3f}]")
+    print(f"Precision(1) : median={np.median(precisions_1):.3f}  [{min(precisions_1):.3f}, {max(precisions_1):.3f}]")
+    print(f"Recall(1)    : median={np.median(recalls_1):.3f}  [{min(recalls_1):.3f}, {max(recalls_1):.3f}]")
+
+    summary.to_csv(os.path.join(RESULTS_DIR, "logistic_iterations_summary.csv"), index=False)
+
+    # Modele final
+    X_train, X_val, X_test, y_train, y_val, y_test = split_train_val_test(X, y, random_state=42)
+    X_train_s, X_val_s, X_test_s, median_values, scaler = impute_and_scale_for_lr(X_train, X_val, X_test)
+
+    final_model = LogisticRegression(class_weight="balanced", max_iter=2000, random_state=42)
+    final_model.fit(X_train_s, y_train)
+    y_val_proba = final_model.predict_proba(X_val_s)[:, 1]
+    final_threshold = find_best_threshold(y_val_proba, y_val)
+
+    coef_series = pd.Series(final_model.coef_[0], index=X_train_s.columns).sort_values(ascending=False)
+    print("\nTop 15 coefficients positifs (associes a un risque de rachat plus eleve) :")
+    print(coef_series.head(15))
+    print("\nTop 15 coefficients negatifs :")
+    print(coef_series.tail(15))
+
+    joblib.dump(
+        {
+            "model": final_model, "scaler": scaler, "median_values": median_values,
+            "threshold": final_threshold, "feature_columns": list(X_train_s.columns),
+        },
+        os.path.join(RESULTS_DIR, "logistic_final_model.pkl"),
+    )
+    print(f"\nModele final sauvegarde dans {RESULTS_DIR}/logistic_final_model.pkl")
+
+
+if __name__ == "__main__":
+    main()
