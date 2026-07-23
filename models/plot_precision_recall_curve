@@ -1,0 +1,91 @@
+import numpy as np
+import joblib
+import matplotlib.pyplot as plt
+from sklearn.metrics import precision_recall_curve, confusion_matrix
+import seaborn as sns
+import os
+
+from preprocessing import load_training_data, split_train_val_test
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(SCRIPT_DIR, "..", "data", "training_set_italy.csv")
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "..", "results")
+FIGURES_DIR = os.path.join(SCRIPT_DIR, "..", "figures")
+os.makedirs(FIGURES_DIR, exist_ok=True)
+
+
+def main():
+    X, y, names = load_training_data(DATA_PATH)
+    X_train, X_val, X_test, y_train, y_val, y_test = split_train_val_test(X, y, random_state=42)
+
+    pipeline = joblib.load(os.path.join(RESULTS_DIR, "xgboost_final_model.pkl"))
+    model = pipeline["model"]
+    threshold = pipeline["threshold"]
+    feature_columns = pipeline["feature_columns"]
+
+    X_test = X_test[feature_columns]
+    y_proba = model.predict_proba(X_test)[:, 1]
+
+    precision, recall, thresholds = precision_recall_curve(y_test, y_proba)
+
+    no_skill = y_test.sum() / len(y_test)
+
+    # Point correspondant au seuil retenu
+    idx_threshold = np.argmin(np.abs(thresholds - threshold)) if len(thresholds) else 0
+    prec_at_threshold = precision[idx_threshold]
+    rec_at_threshold = recall[idx_threshold]
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.plot(recall, precision, label="XGBoost (modele final)", color="darkorange", linewidth=2)
+    ax.axhline(no_skill, linestyle="--", color="gray", label=f"No Skill (prevalence = {no_skill:.3f})")
+    ax.scatter([rec_at_threshold], [prec_at_threshold], color="red", zorder=5,
+               label=f"Seuil retenu ({threshold:.3f})\nPrec={prec_at_threshold:.2f} Rec={rec_at_threshold:.2f}")
+
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("Courbe Precision-Recall -- test set (out-of-sample)")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1.05)
+    ax.legend(loc="lower left")
+    ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    output_path = os.path.join(FIGURES_DIR, "precision_recall_curve_final_model.png")
+    plt.savefig(output_path, dpi=150)
+    print(f"Graphe sauvegarde : {output_path}")
+    print(f"\nNo Skill (prevalence reelle du test set) : {no_skill:.4f}")
+    print(f"Seuil retenu : {threshold:.4f} -> Precision={prec_at_threshold:.3f}, Recall={rec_at_threshold:.3f}")
+    print("\nRappel : deplacer le curseur de seuil vers la gauche (baisser le seuil) "
+          "augmente le recall au prix de la precision, et inversement -- "
+          "le choix depend de la contrainte metier (voir README).")
+
+    # --- Matrice de confusion, au seuil retenu ---
+    y_pred = (y_proba >= threshold).astype(int)
+    cm = confusion_matrix(y_test, y_pred)
+
+    fig2, ax2 = plt.subplots(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", ax=ax2,
+                xticklabels=["Predit 0", "Predit 1"],
+                yticklabels=["Reel 0", "Reel 1"])
+    ax2.set_title(f"Matrice de confusion -- test set (seuil={threshold:.3f})")
+    ax2.set_xlabel("Predit")
+    ax2.set_ylabel("Reel")
+
+    plt.tight_layout()
+    cm_output_path = os.path.join(FIGURES_DIR, "confusion_matrix_final_model.png")
+    plt.savefig(cm_output_path, dpi=150)
+    print(f"\nMatrice de confusion sauvegardee : {cm_output_path}")
+
+    tn, fp, fn, tp = cm.ravel()
+    print(f"\nVrais negatifs (TN)  : {tn}")
+    print(f"Faux positifs (FP)   : {fp}")
+    print(f"Faux negatifs (FN)   : {fn}")
+    print(f"Vrais positifs (TP)  : {tp}")
+    print(f"\nSur {tp + fn} vrais positifs dans le test set, le modele en detecte {tp} "
+          f"({100 * tp / (tp + fn):.1f}%) et en rate {fn}.")
+    print(f"Sur {tp + fp} alertes emises par le modele, {tp} sont correctes "
+          f"({100 * tp / (tp + fp):.1f}% de precision).")
+
+
+if __name__ == "__main__":
+    main()
