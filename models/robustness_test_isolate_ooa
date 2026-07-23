@@ -1,0 +1,100 @@
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import os
+
+from preprocessing import load_training_data, split_train_val_test
+from evaluate import find_best_threshold, evaluate
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(SCRIPT_DIR, "..", "data", "training_set_italy.csv")
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "..", "results")
+
+N_ITERATIONS = 10
+SEEDS = list(range(42, 42 + N_ITERATIONS))
+
+VALUE_COLS = [
+    "other_operating_assets__liabilities_latest",
+    "other_operating_assets__liabilities_prev",
+    "other_operating_assets__liabilities_growth",
+]
+NYEARS_COL = ["other_operating_assets__liabilities_n_years"]
+
+
+def run_scenario(X, y, label):
+    all_metrics = []
+    for seed in SEEDS:
+        X_train, X_val, X_test, y_train, y_val, y_test = split_train_val_test(
+            X, y, random_state=seed
+        )
+        scale_pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+
+        model = xgb.XGBClassifier(
+            objective="binary:logistic", eval_metric="aucpr",
+            n_estimators=500, learning_rate=0.03, max_depth=4,
+            min_child_weight=3, subsample=0.8, colsample_bytree=0.8,
+            scale_pos_weight=scale_pos_weight, random_state=seed,
+            early_stopping_rounds=30,
+        )
+        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+
+        y_val_proba = model.predict_proba(X_val)[:, 1]
+        best_threshold = find_best_threshold(y_val_proba, y_val)
+        y_test_proba = model.predict_proba(X_test)[:, 1]
+        metrics = evaluate(y_test, y_test_proba, best_threshold)
+        all_metrics.append(metrics)
+
+    auc_prs = [m["auc_pr"] for m in all_metrics]
+    roc_aucs = [m["roc_auc"] for m in all_metrics]
+    print(f"\n=== {label} ===")
+    print(f"AUC-PR  : median={np.median(auc_prs):.3f}  [{min(auc_prs):.3f}, {max(auc_prs):.3f}]")
+    print(f"ROC-AUC : median={np.median(roc_aucs):.3f}  [{min(roc_aucs):.3f}, {max(roc_aucs):.3f}]")
+    return np.median(auc_prs)
+
+
+def main():
+    X, y, names = load_training_data(DATA_PATH)
+
+    present_value_cols = [c for c in VALUE_COLS if c in X.columns]
+    present_nyears_col = [c for c in NYEARS_COL if c in X.columns]
+
+    # Scenario A : retire seulement _latest/_prev/_growth, garde _n_years
+    X_without_value = X.drop(columns=present_value_cols)
+    auc_pr_without_value = run_scenario(
+        X_without_value, y,
+        "Sans _latest/_prev/_growth (garde uniquement _n_years)"
+    )
+
+    # Scenario B : retire seulement _n_years, garde _latest/_prev/_growth
+    X_without_nyears = X.drop(columns=present_nyears_col)
+    auc_pr_without_nyears = run_scenario(
+        X_without_nyears, y,
+        "Sans _n_years (garde _latest/_prev/_growth)"
+    )
+
+    baseline_path = os.path.join(RESULTS_DIR, "xgboost_iterations_summary.csv")
+    baseline_median = None
+    if os.path.exists(baseline_path):
+        baseline = pd.read_csv(baseline_path)
+        baseline_median = baseline["auc_pr"].median()
+        print(f"\n=== Baseline complete (avec tout) ===")
+        print(f"AUC-PR median = {baseline_median:.3f}")
+
+    print("\n=== Verdict ===")
+    if baseline_median is not None:
+        drop_a = baseline_median - auc_pr_without_value
+        drop_b = baseline_median - auc_pr_without_nyears
+        print(f"Chute quand on retire _latest/_prev/_growth : {drop_a:+.3f}")
+        print(f"Chute quand on retire _n_years              : {drop_b:+.3f}")
+        if drop_b > drop_a:
+            print("-> _n_years porte PLUS de signal que _latest/_prev/_growth : "
+                  "c'est la PROFONDEUR D'HISTORIQUE disponible qui compte, pas la valeur.")
+        elif drop_a > drop_b:
+            print("-> _latest/_prev/_growth portent PLUS de signal que _n_years : "
+                  "c'est la VALEUR du poste comptable qui compte, pas juste sa presence.")
+        else:
+            print("-> Contribution comparable des deux -- les deux hypotheses jouent un role.")
+
+
+if __name__ == "__main__":
+    main()
