@@ -1,0 +1,122 @@
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+import joblib
+import os
+
+from preprocessing import load_training_data, split_train_val_test
+from evaluate import find_best_threshold, evaluate
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_PATH = os.path.join(SCRIPT_DIR, "..", "data", "training_set_italy.csv")
+RESULTS_DIR = os.path.join(SCRIPT_DIR, "..", "results")
+os.makedirs(RESULTS_DIR, exist_ok=True)
+
+N_ITERATIONS = 10
+SEEDS = list(range(42, 42 + N_ITERATIONS))
+
+
+def run_one_iteration(X, y, seed):
+    X_train, X_val, X_test, y_train, y_val, y_test = split_train_val_test(
+        X, y, random_state=seed
+    )
+
+    scale_pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+
+    model = xgb.XGBClassifier(
+        objective="binary:logistic",
+        eval_metric="aucpr",
+        n_estimators=500,
+        learning_rate=0.03,
+        max_depth=4,
+        min_child_weight=3,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        scale_pos_weight=scale_pos_weight,
+        random_state=seed,
+        early_stopping_rounds=30,
+    )
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+
+    y_val_proba = model.predict_proba(X_val)[:, 1]
+    best_threshold = find_best_threshold(y_val_proba, y_val)
+
+    y_test_proba = model.predict_proba(X_test)[:, 1]
+    metrics = evaluate(y_test, y_test_proba, best_threshold)
+
+    return model, metrics
+
+
+def main():
+    X, y, names = load_training_data(DATA_PATH)
+    print(f"Dataset : {len(X)} lignes, {y.sum()} positifs, {len(X.columns)} features.")
+
+    all_metrics = []
+    best_model = None
+    best_auc_pr = -1
+
+    for seed in SEEDS:
+        model, metrics = run_one_iteration(X, y, seed)
+        all_metrics.append(metrics)
+        print(
+            f"Seed {seed}: AUC-PR={metrics['auc_pr']:.3f} ROC-AUC={metrics['roc_auc']:.3f} "
+            f"seuil={metrics['threshold']:.3f} "
+            f"precision(1)={metrics['classification_report']['1']['precision']:.2f} "
+            f"recall(1)={metrics['classification_report']['1']['recall']:.2f}"
+        )
+        if metrics["auc_pr"] > best_auc_pr:
+            best_auc_pr = metrics["auc_pr"]
+            best_model = model
+
+    auc_prs = [m["auc_pr"] for m in all_metrics]
+    roc_aucs = [m["roc_auc"] for m in all_metrics]
+    precisions_1 = [m["classification_report"]["1"]["precision"] for m in all_metrics]
+    recalls_1 = [m["classification_report"]["1"]["recall"] for m in all_metrics]
+
+    summary = pd.DataFrame({
+        "seed": SEEDS,
+        "auc_pr": auc_prs,
+        "roc_auc": roc_aucs,
+        "precision_class1": precisions_1,
+        "recall_class1": recalls_1,
+    })
+
+    print("\n=== Resume sur 10 iterations ===")
+    print(f"AUC-PR   : median={np.median(auc_prs):.3f}  [{min(auc_prs):.3f}, {max(auc_prs):.3f}]")
+    print(f"ROC-AUC  : median={np.median(roc_aucs):.3f}  [{min(roc_aucs):.3f}, {max(roc_aucs):.3f}]")
+    print(f"Precision(1) : median={np.median(precisions_1):.3f}  [{min(precisions_1):.3f}, {max(precisions_1):.3f}]")
+    print(f"Recall(1)    : median={np.median(recalls_1):.3f}  [{min(recalls_1):.3f}, {max(recalls_1):.3f}]")
+
+    summary.to_csv(os.path.join(RESULTS_DIR, "xgboost_iterations_summary.csv"), index=False)
+
+    # Modele final : entraine sur TOUTES les donnees disponibles (une fois
+    # la stabilite evaluee ci-dessus), avec un split train/val simple pour
+    # le early stopping et le seuil.
+    X_train, X_val, X_test, y_train, y_val, y_test = split_train_val_test(X, y, random_state=42)
+    final_scale_pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+    final_model = xgb.XGBClassifier(
+        objective="binary:logistic", eval_metric="aucpr",
+        n_estimators=500, learning_rate=0.03, max_depth=4,
+        min_child_weight=3, subsample=0.8, colsample_bytree=0.8,
+        scale_pos_weight=final_scale_pos_weight, random_state=42,
+        early_stopping_rounds=30,
+    )
+    final_model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    y_val_proba = final_model.predict_proba(X_val)[:, 1]
+    final_threshold = find_best_threshold(y_val_proba, y_val)
+
+    importance = pd.Series(
+        final_model.feature_importances_, index=X_train.columns
+    ).sort_values(ascending=False)
+    print("\nTop 20 features (modele final) :")
+    print(importance.head(20))
+
+    joblib.dump(
+        {"model": final_model, "threshold": final_threshold, "feature_columns": list(X_train.columns)},
+        os.path.join(RESULTS_DIR, "xgboost_final_model.pkl"),
+    )
+    print(f"\nModele final sauvegarde dans {RESULTS_DIR}/xgboost_final_model.pkl")
+
+
+if __name__ == "__main__":
+    main()
