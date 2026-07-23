@@ -1,0 +1,73 @@
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+
+TARGET_COL = "is_ma_target"
+ID_COLS = ["name"]
+
+
+def load_training_data(path):
+    df = pd.read_csv(path)
+    feature_cols = [c for c in df.columns if c not in ID_COLS + [TARGET_COL]]
+    X = df[feature_cols].copy()
+    y = df[TARGET_COL].copy()
+    names = df["name"].copy()
+    return X, y, names
+
+
+def split_train_val_test(X, y, test_size=0.2, val_size=0.2, random_state=42):
+    """
+    Split stratifie en 3 : train / val / test. Avec un nombre de positifs
+    limite, chaque sous-ensemble reste correctement stratifie (meme
+    proportion de positifs partout) grace a stratify=y.
+    """
+    X_train_full, X_test, y_train_full, y_test = train_test_split(
+        X, y, test_size=test_size, stratify=y, random_state=random_state
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_full, y_train_full, test_size=val_size, stratify=y_train_full,
+        random_state=random_state
+    )
+    return X_train, X_val, X_test, y_train, y_val, y_test
+
+
+def impute_and_scale_for_lr(X_train, X_val, X_test):
+    """
+    La regression logistique ne supporte pas les NaN -- imputation par
+    mediane (calculee sur train uniquement) + ajout d'un indicateur de
+    valeur manquante par colonne + standardisation.
+
+    Cas particulier gere : si une colonne est ENTIEREMENT vide dans le
+    train (aucune entreprise n'a cette donnee), sa mediane est elle-meme
+    NaN -- fillna(mediane) ne comblerait alors rien. On applique donc un
+    fillna(0) en filet de securite apres l'imputation par mediane.
+    """
+    from sklearn.preprocessing import StandardScaler
+
+    median_values = X_train.median()
+
+    def build_imputed(df_):
+        missing_flags = df_.isna().astype(int)
+        missing_flags.columns = [f"{c}_missing" for c in missing_flags.columns]
+
+        imputed = df_.fillna(median_values)
+        imputed = imputed.fillna(0)  # filet de securite : colonnes entierement vides
+
+        return pd.concat([imputed, missing_flags], axis=1)
+
+    X_train_imp = build_imputed(X_train)
+    X_val_imp = build_imputed(X_val)
+    X_test_imp = build_imputed(X_test)
+
+    scaler = StandardScaler()
+    X_train_scaled = pd.DataFrame(
+        scaler.fit_transform(X_train_imp), columns=X_train_imp.columns, index=X_train_imp.index
+    ).fillna(0)
+    X_val_scaled = pd.DataFrame(
+        scaler.transform(X_val_imp), columns=X_val_imp.columns, index=X_val_imp.index
+    ).fillna(0)
+    X_test_scaled = pd.DataFrame(
+        scaler.transform(X_test_imp), columns=X_test_imp.columns, index=X_test_imp.index
+    ).fillna(0)
+
+    return X_train_scaled, X_val_scaled, X_test_scaled, median_values, scaler
